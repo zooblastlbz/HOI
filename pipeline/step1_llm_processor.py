@@ -10,8 +10,9 @@ except ImportError:
     # print("Warning: vLLM not installed.")
 
 class LLMProcessor:
-    def __init__(self, model_path):
+    def __init__(self, model_path, tensor_parallel_size=1):
         self.model_path = model_path
+        self.tensor_parallel_size = tensor_parallel_size
         self.llm = None
 
     def _get_prompt(self, caption):
@@ -74,8 +75,8 @@ class LLMProcessor:
         if self.llm is None:
             if LLM is None:
                 raise ImportError("vLLM is not installed. Cannot load local model.")
-            print(f"Loading vLLM model from {self.model_path}...")
-            self.llm = LLM(model=self.model_path, trust_remote_code=True)
+            print(f"Loading vLLM model from {self.model_path} with tensor_parallel_size={self.tensor_parallel_size}...")
+            self.llm = LLM(model=self.model_path, trust_remote_code=True, tensor_parallel_size=self.tensor_parallel_size)
 
     def unload_model(self):
         if self.llm is not None:
@@ -153,7 +154,7 @@ class LLMProcessor:
 
 if __name__ == "__main__":
     # Test code
-    processor = LLMProcessor(model_path="path/to/your/model")
+    processor = LLMProcessor(model_path="path/to/your/model", tensor_parallel_size=1)
     test_items = [
         {"caption": "A man holding a cup."},
         {"caption": "A woman kicking a ball."}

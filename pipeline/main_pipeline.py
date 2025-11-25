@@ -23,10 +23,74 @@ from step2_grounding import GroundingModule
 from step3_pose_estimation import PoseModule
 
 class HOIPipeline:
-    def __init__(self, llm_model_path=None):
-        self.llm = LLMProcessor(model_path=llm_model_path)
-        self.grounding = GroundingModule()
-        self.pose = PoseModule()
+    def __init__(self, llm_model_path=None, 
+                 llm_tensor_parallel_size=1,
+                 sam_model_path="facebook/sam3-demo",
+                 sam_gpu_ids=None, sam_batch_size=1,
+                 yolo_model_path="yolo11n-pose.pt",
+                 yolo_gpu_ids=None, yolo_batch_size=1):
+        """
+        初始化 HOI Pipeline (延迟加载模式)
+        
+        Args:
+            llm_model_path: vLLM模型路径
+            llm_tensor_parallel_size: vLLM的tensor parallel size (GPU数量)
+            sam_model_path: SAM3模型路径或HuggingFace ID
+            sam_gpu_ids: SAM使用的GPU ID列表，如 [0, 1, 2]
+            sam_batch_size: SAM的batch size
+            yolo_model_path: YOLO模型路径
+            yolo_gpu_ids: YOLO使用的GPU ID列表，如 [0, 1]
+            yolo_batch_size: YOLO的batch size
+        """
+        # 保存配置，延迟加载模型
+        self.llm_model_path = llm_model_path
+        self.llm_tensor_parallel_size = llm_tensor_parallel_size
+        self.sam_model_path = sam_model_path
+        self.sam_gpu_ids = sam_gpu_ids
+        self.sam_batch_size = sam_batch_size
+        self.yolo_model_path = yolo_model_path
+        self.yolo_gpu_ids = yolo_gpu_ids
+        self.yolo_batch_size = yolo_batch_size
+        
+        # 模型实例，延迟初始化
+        self._llm = None
+        self._grounding = None
+        self._pose = None
+
+    @property
+    def llm(self):
+        """延迟加载 LLM 模块"""
+        if self._llm is None:
+            print("Initializing LLM module...")
+            self._llm = LLMProcessor(
+                model_path=self.llm_model_path, 
+                tensor_parallel_size=self.llm_tensor_parallel_size
+            )
+        return self._llm
+
+    @property
+    def grounding(self):
+        """延迟加载 Grounding 模块"""
+        if self._grounding is None:
+            print("Initializing Grounding (SAM) module...")
+            self._grounding = GroundingModule(
+                model_name=self.sam_model_path, 
+                gpu_ids=self.sam_gpu_ids, 
+                batch_size=self.sam_batch_size
+            )
+        return self._grounding
+
+    @property
+    def pose(self):
+        """延迟加载 Pose 模块"""
+        if self._pose is None:
+            print("Initializing Pose (YOLO) module...")
+            self._pose = PoseModule(
+                model_path=self.yolo_model_path, 
+                gpu_ids=self.yolo_gpu_ids, 
+                batch_size=self.yolo_batch_size
+            )
+        return self._pose
 
     def load_lmdb_data(self, lmdb_path, num_samples=None):
         if lmdb is None:
@@ -349,7 +413,39 @@ if __name__ == "__main__":
     parser.add_argument("--llm_model", default="facebook/opt-125m", help="Path to local LLM model for vLLM")
     parser.add_argument("--num_samples", type=int, default=None, help="Number of samples to process from LMDB")
     parser.add_argument("--step", type=int, default=None, choices=[1, 2, 3], help="Run a specific step (1, 2, or 3). If not specified, runs all steps.")
+    
+    # 模型路径配置
+    parser.add_argument("--sam_model", default="facebook/sam3-demo", 
+                        help="Path to SAM3 model or HuggingFace model ID")
+    parser.add_argument("--yolo_model", default="yolo11n-pose.pt", 
+                        help="Path to YOLO pose model")
+    
+    # GPU 配置参数
+    parser.add_argument("--llm_tensor_parallel_size", type=int, default=1, 
+                        help="Tensor parallel size for vLLM (number of GPUs for LLM)")
+    parser.add_argument("--sam_gpu_ids", type=str, default="0", 
+                        help="Comma-separated GPU IDs for SAM model (e.g., '0,1,2')")
+    parser.add_argument("--sam_batch_size", type=int, default=1, 
+                        help="Batch size for SAM model")
+    parser.add_argument("--yolo_gpu_ids", type=str, default="0", 
+                        help="Comma-separated GPU IDs for YOLO model (e.g., '0,1')")
+    parser.add_argument("--yolo_batch_size", type=int, default=1, 
+                        help="Batch size for YOLO model")
+    
     args = parser.parse_args()
     
-    pipeline = HOIPipeline(llm_model_path=args.llm_model)
+    # 解析 GPU ID 列表
+    sam_gpu_ids = [int(x.strip()) for x in args.sam_gpu_ids.split(',') if x.strip()]
+    yolo_gpu_ids = [int(x.strip()) for x in args.yolo_gpu_ids.split(',') if x.strip()]
+    
+    pipeline = HOIPipeline(
+        llm_model_path=args.llm_model,
+        llm_tensor_parallel_size=args.llm_tensor_parallel_size,
+        sam_model_path=args.sam_model,
+        sam_gpu_ids=sam_gpu_ids,
+        sam_batch_size=args.sam_batch_size,
+        yolo_model_path=args.yolo_model,
+        yolo_gpu_ids=yolo_gpu_ids,
+        yolo_batch_size=args.yolo_batch_size
+    )
     pipeline.run_pipeline(args.input, args.output_dir, num_samples=args.num_samples, step=args.step)
