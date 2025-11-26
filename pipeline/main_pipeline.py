@@ -291,43 +291,48 @@ class HOIPipeline:
         # Batch processing for LLM
         return self.llm.process_batch(items)
 
-    def process_step2_grounding(self, item):
-        image_path = item.get('image_path')
-        # If image_path is missing or invalid, we might skip grounding but keep the item
-        if not image_path or not os.path.exists(image_path):
-            # print(f"Warning: Image path not found: {image_path}")
-            return item
-            
-        annotations = item.get('uncertain_body_part_annotation', [])
-        for part in annotations:
-            person_desc = part.get("person_description")
-            obj_name = part.get("interaction_object")
-            
-            # Ground Person
-            if 'person_bbox' not in part:
-                person_bbox = self.grounding.detect_person(image_path, person_desc)
-                part['person_bbox'] = person_bbox
-            
-            # Ground Object
-            if obj_name and 'object_bbox' not in part:
-                person_bbox = part.get('person_bbox')
-                obj_bbox = self.grounding.detect_object_in_roi(image_path, obj_name, person_bbox)
-                part['object_bbox'] = obj_bbox
-        
-        item['uncertain_body_part_annotation'] = annotations
-        return item
+    def process_step2_grounding(self, items):
+        # Batch processing for Grounding
+        return self.grounding.process_items_batch(items)
 
     def process_step3_pose(self, item):
+        """
+        处理 Step 3: Pose Estimation
+        跳过 grounding 被跳过或无效的数据
+        """
+        # 检查是否在 Step 2 被跳过
+        if item.get('grounding_skipped', False):
+            item['pose_skipped'] = True
+            item['pose_skip_reason'] = f"grounding was skipped: {item.get('grounding_skip_reason', 'unknown')}"
+            return item
+        
         image_path = item.get('image_path')
         if not image_path or not os.path.exists(image_path):
+            item['pose_skipped'] = True
+            item['pose_skip_reason'] = "image_not_found"
             return item
-            
+        
         annotations = item.get('uncertain_body_part_annotation', [])
+        
+        # 再次检查 annotations 类型
+        if isinstance(annotations, str) or not annotations:
+            item['pose_skipped'] = True
+            item['pose_skip_reason'] = "no_valid_annotations"
+            return item
+        
+        item['pose_skipped'] = False
+        
         for part in annotations:
+            # 跳过 grounding 无效的数据
+            if not part.get('grounding_valid', True):
+                part["resolved_side"] = "skipped (grounding invalid)"
+                continue
+                
             person_bbox = part.get('person_bbox')
-            obj_bbox = part.get('object_bbox')
+            obj_bbox = part.get('object_bbox')  # 使用主要的 object_bbox
+            obj_bboxes = part.get('object_bboxes', [])  # 所有检测到的物品
             interaction_types = part.get("interaction_category", [])
-            body_part = part.get("body_part")
+            body_part = part.get("body_part", "")
             
             if not person_bbox:
                 part["resolved_side"] = "unknown (no person bbox)"
@@ -343,10 +348,20 @@ class HOIPipeline:
             if "close_proximity" in interaction_types and obj_bbox:
                 if "hand" in body_part or "arm" in body_part:
                     final_side = self.resolve_side(keypoints, obj_bbox)
+                    
+                    # 如果有多个物品，可以记录与每个物品的关系
+                    if len(obj_bboxes) > 1:
+                        part["multi_object_sides"] = []
+                        for bbox in obj_bboxes:
+                            side = self.resolve_side(keypoints, bbox)
+                            part["multi_object_sides"].append({
+                                "bbox": bbox,
+                                "side": side
+                            })
             
             # Strategy B: Directional Orientation (Vector-based)
             elif "directional_orientation" in interaction_types:
-                final_side = "needs_directional_logic" # Placeholder for vector logic
+                final_side = "needs_directional_logic"  # Placeholder for vector logic
 
             part["resolved_side"] = final_side
             
@@ -401,7 +416,7 @@ class HOIPipeline:
             self.run_step("Step 1: LLM Analysis", self.process_step1_llm, in_s1, step1_out, batch_mode=True, num_samples=num_samples)
         
         if step is None or step == 2:
-            self.run_step("Step 2: Visual Grounding", self.process_step2_grounding, in_s2, step2_out, num_samples=num_samples)
+            self.run_step("Step 2: Visual Grounding", self.process_step2_grounding, in_s2, step2_out, batch_mode=True, num_samples=num_samples)
             
         if step is None or step == 3:
             self.run_step("Step 3: Pose & Resolution", self.process_step3_pose, in_s3, step3_out, num_samples=num_samples)

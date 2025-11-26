@@ -4,6 +4,12 @@ import numpy as np
 from PIL import Image
 
 try:
+    from tqdm import tqdm
+except ImportError:
+    def tqdm(iterable, **kwargs):
+        return iterable
+
+try:
     from transformers import Sam3Processor, Sam3Model
 except ImportError:
     print("Warning: transformers library not found or Sam3 not available.")
@@ -39,33 +45,27 @@ class GroundingModule:
         else:
             print("SAM3 modules not available in transformers.")
 
-    def _get_bbox_from_mask(self, mask):
+    def _convert_bbox(self, bbox):
         """
-        Convert a binary mask (numpy or tensor) to [x1, y1, x2, y2].
+        Convert bbox to [x1, y1, x2, y2] format (list of ints).
         """
-        if isinstance(mask, torch.Tensor):
-            mask = mask.cpu().numpy()
-        
-        # mask shape: (H, W)
-        rows = np.any(mask, axis=1)
-        cols = np.any(mask, axis=0)
-        
-        if not np.any(rows) or not np.any(cols):
+        if bbox is None:
             return None
-        
-        y_min, y_max = np.where(rows)[0][[0, -1]]
-        x_min, x_max = np.where(cols)[0][[0, -1]]
-        
-        return [int(x_min), int(y_min), int(x_max), int(y_max)]
+        if isinstance(bbox, torch.Tensor):
+            bbox = bbox.cpu().numpy()
+        if isinstance(bbox, np.ndarray):
+            bbox = bbox.tolist()
+        return [int(b) for b in bbox]
 
     def detect_person(self, image_path, person_description):
         """
         Step 2.1: Detect the specific person described by the text using SAM3.
-        Returns: Bounding Box [x1, y1, x2, y2] of the person.
+        Returns: 
+            - Bounding Box [x1, y1, x2, y2] if exactly ONE person is detected
+            - None if no person or multiple persons detected (invalid data)
         """
         if not self.model:
-            print(f"[Mock] SAM3 Detecting person: '{person_description}'")
-            return [100, 100, 400, 400]
+            raise ValueError("SAM3 model not loaded. Cannot perform person detection.")
 
         print(f"SAM3 processing: '{person_description}' in {image_path}")
         
@@ -84,22 +84,20 @@ class GroundingModule:
                 target_sizes=inputs.get("original_sizes").tolist()
             )
             
-            # results[0] corresponds to the first (and only) image
-            masks = results[0]['masks'] # Shape: (N, H, W)
-            scores = results[0].get('scores', [])
+            # Results contain: masks, boxes, scores
+            boxes = results[0].get('boxes', [])
             
-            if len(masks) > 0:
-                # If multiple matches, pick the one with highest score if available, else first
-                best_idx = 0
-                if len(scores) > 0:
-                    best_idx = torch.argmax(scores).item()
-                
-                best_mask = masks[best_idx]
-                bbox = self._get_bbox_from_mask(best_mask)
-                return bbox if bbox else None
-            else:
+            # 验证：人物检测必须只有1个结果
+            if len(boxes) == 0:
                 print(f"No person found for description: {person_description}")
                 return None
+            elif len(boxes) > 1:
+                print(f"Multiple persons ({len(boxes)}) found for description: '{person_description}' - marking as invalid")
+                return None  # 返回 None 表示数据无效
+            
+            # 只有1个人，直接使用返回的 box
+            bbox = self._convert_bbox(boxes[0])
+            return bbox
 
         except Exception as e:
             print(f"Error in detect_person: {e}")
@@ -109,11 +107,10 @@ class GroundingModule:
         """
         Batch detection for persons.
         items: List of dicts with 'image_path' and 'person_description'
-        Returns: List of bounding boxes
+        Returns: List of bounding boxes (None for invalid items with 0 or >1 persons)
         """
         if not self.model:
-            print(f"[Mock] SAM3 Batch detecting {len(items)} persons")
-            return [[100, 100, 400, 400] for _ in items]
+            raise ValueError("SAM3 model not loaded. Cannot perform batch detection.")
 
         results_list = []
         
@@ -155,16 +152,18 @@ class GroundingModule:
                     )
                     
                     for k, idx in enumerate(valid_indices):
-                        masks = post_results[k]['masks']
-                        scores = post_results[k].get('scores', [])
+                        boxes = post_results[k].get('boxes', [])
                         
-                        if len(masks) > 0:
-                            best_idx = 0
-                            if len(scores) > 0:
-                                best_idx = torch.argmax(scores).item()
-                            best_mask = masks[best_idx]
-                            bbox = self._get_bbox_from_mask(best_mask)
-                            batch_results[idx] = bbox
+                        # 验证：人物检测必须只有1个结果
+                        if len(boxes) == 0:
+                            print(f"No person found for item {idx}")
+                            batch_results[idx] = None
+                        elif len(boxes) > 1:
+                            print(f"Multiple persons ({len(boxes)}) found for item {idx} - marking as invalid")
+                            batch_results[idx] = None
+                        else:
+                            # 只有1个人，直接使用返回的 box
+                            batch_results[idx] = self._convert_bbox(boxes[0])
                             
                 except Exception as e:
                     print(f"Error in batch person detection: {e}")
@@ -173,34 +172,21 @@ class GroundingModule:
         
         return results_list
 
-    def detect_object_in_roi(self, image_path, object_name, roi_bbox):
+    def detect_object(self, image_path, object_name):
         """
-        Step 2.2: Detect the interaction object within the Person's ROI using SAM3.
-        Returns: Bounding Box [x1, y1, x2, y2] of the object.
+        Detect the interaction object in the full image using SAM3.
+        Returns: List of Bounding Boxes [[x1, y1, x2, y2], ...] for all detected objects.
         """
         if not self.model:
-            print(f"[Mock] SAM3 Detecting object: '{object_name}' inside ROI {roi_bbox}")
-            return [150, 150, 200, 200]
+            raise ValueError("SAM3 model not loaded. Cannot perform object detection.")
 
-        print(f"SAM3 processing object: '{object_name}' in ROI")
+        print(f"SAM3 processing object: '{object_name}' in full image")
         
         try:
-            full_image = Image.open(image_path).convert("RGB")
+            image = Image.open(image_path).convert("RGB")
             
-            # Crop image to ROI
-            x1, y1, x2, y2 = map(int, roi_bbox)
-            w, h = full_image.size
-            x1, y1 = max(0, x1), max(0, y1)
-            x2, y2 = min(w, x2), min(h, y2)
-            
-            if x2 <= x1 or y2 <= y1:
-                print("Invalid ROI for object detection.")
-                return None
-                
-            crop_image = full_image.crop((x1, y1, x2, y2))
-            
-            # SAM3 inference on crop
-            inputs = self.processor(images=[crop_image], text=[object_name], return_tensors="pt").to(self.device)
+            # SAM3 inference on full image
+            inputs = self.processor(images=[image], text=[object_name], return_tensors="pt").to(self.device)
             
             with torch.no_grad():
                 outputs = self.model(**inputs)
@@ -212,85 +198,59 @@ class GroundingModule:
                 target_sizes=inputs.get("original_sizes").tolist()
             )
             
-            masks = results[0]['masks']
-            scores = results[0].get('scores', [])
+            # Results contain: masks, boxes, scores
+            boxes = results[0].get('boxes', [])
             
-            if len(masks) > 0:
-                best_idx = 0
-                if len(scores) > 0:
-                    best_idx = torch.argmax(scores).item()
-                    
-                best_mask = masks[best_idx]
-                local_bbox = self._get_bbox_from_mask(best_mask)
-                
-                if local_bbox:
-                    # Convert local crop coordinates back to global coordinates
-                    lx1, ly1, lx2, ly2 = local_bbox
-                    return [lx1 + x1, ly1 + y1, lx2 + x1, ly2 + y1]
+            if len(boxes) == 0:
+                print(f"No object found for: {object_name}")
+                return []
             
-            return None
+            # 物品可以有多个，返回所有检测到的 boxes
+            result_boxes = []
+            for box in boxes:
+                bbox = self._convert_bbox(box)
+                if bbox:
+                    result_boxes.append(bbox)
+            
+            return result_boxes
 
         except Exception as e:
-            print(f"Error in detect_object_in_roi: {e}")
-            return None
+            print(f"Error in detect_object: {e}")
+            return []
 
-    def detect_object_in_roi_batch(self, items):
+    def detect_object_batch(self, items):
         """
-        Batch detection for objects in ROI.
-        items: List of dicts with 'image_path', 'object_name', 'roi_bbox'
-        Returns: List of bounding boxes
+        Batch detection for objects in full image.
+        items: List of dicts with 'image_path', 'object_name'
+        Returns: List of lists of bounding boxes (multiple objects allowed per item)
         """
         if not self.model:
-            print(f"[Mock] SAM3 Batch detecting {len(items)} objects")
-            return [[150, 150, 200, 200] for _ in items]
+            raise ValueError("SAM3 model not loaded. Cannot perform batch object detection.")
 
         results_list = []
         
         # Process in batches
         for i in range(0, len(items), self.batch_size):
             batch = items[i:i + self.batch_size]
-            crop_images = []
+            images = []
             texts = []
-            offsets = []  # Store (x1, y1) for coordinate conversion
             
             for item in batch:
                 try:
-                    roi_bbox = item.get('roi_bbox')
-                    if not roi_bbox:
-                        crop_images.append(None)
-                        texts.append("")
-                        offsets.append((0, 0))
-                        continue
-                        
-                    full_image = Image.open(item['image_path']).convert("RGB")
-                    x1, y1, x2, y2 = map(int, roi_bbox)
-                    w, h = full_image.size
-                    x1, y1 = max(0, x1), max(0, y1)
-                    x2, y2 = min(w, x2), min(h, y2)
-                    
-                    if x2 <= x1 or y2 <= y1:
-                        crop_images.append(None)
-                        texts.append("")
-                        offsets.append((0, 0))
-                        continue
-                    
-                    crop_image = full_image.crop((x1, y1, x2, y2))
-                    crop_images.append(crop_image)
+                    image = Image.open(item['image_path']).convert("RGB")
+                    images.append(image)
                     texts.append(item['object_name'])
-                    offsets.append((x1, y1))
-                    
                 except Exception as e:
                     print(f"Error loading image {item.get('image_path')}: {e}")
-                    crop_images.append(None)
+                    images.append(None)
                     texts.append("")
-                    offsets.append((0, 0))
             
             # Filter valid items
-            valid_indices = [j for j, img in enumerate(crop_images) if img is not None]
-            valid_images = [crop_images[j] for j in valid_indices]
+            valid_indices = [j for j, img in enumerate(images) if img is not None]
+            valid_images = [images[j] for j in valid_indices]
             valid_texts = [texts[j] for j in valid_indices]
             
-            batch_results = [None] * len(batch)
+            batch_results = [[] for _ in batch]
             
             if valid_images:
                 try:
@@ -307,20 +267,16 @@ class GroundingModule:
                     )
                     
                     for k, idx in enumerate(valid_indices):
-                        masks = post_results[k]['masks']
-                        scores = post_results[k].get('scores', [])
-                        offset_x, offset_y = offsets[idx]
+                        boxes = post_results[k].get('boxes', [])
                         
-                        if len(masks) > 0:
-                            best_idx = 0
-                            if len(scores) > 0:
-                                best_idx = torch.argmax(scores).item()
-                            best_mask = masks[best_idx]
-                            local_bbox = self._get_bbox_from_mask(best_mask)
-                            
-                            if local_bbox:
-                                lx1, ly1, lx2, ly2 = local_bbox
-                                batch_results[idx] = [lx1 + offset_x, ly1 + offset_y, lx2 + offset_x, ly2 + offset_y]
+                        # 物品可以有多个，返回所有检测到的 boxes
+                        result_boxes = []
+                        for box in boxes:
+                            bbox = self._convert_bbox(box)
+                            if bbox:
+                                result_boxes.append(bbox)
+                        
+                        batch_results[idx] = result_boxes
                             
                 except Exception as e:
                     print(f"Error in batch object detection: {e}")
@@ -328,3 +284,126 @@ class GroundingModule:
             results_list.extend(batch_results)
         
         return results_list
+
+    # 保留旧方法名作为别名，向后兼容
+    def detect_object_in_roi(self, image_path, object_name, roi_bbox=None):
+        """Deprecated: Use detect_object instead. ROI is now ignored."""
+        return self.detect_object(image_path, object_name)
+
+    def detect_object_in_roi_batch(self, items):
+        """Deprecated: Use detect_object_batch instead. ROI is now ignored."""
+        # 转换参数格式
+        new_items = [{'image_path': item['image_path'], 'object_name': item['object_name']} for item in items]
+        return self.detect_object_batch(new_items)
+
+    def process_items_batch(self, items):
+        """
+        批量处理完整的 grounding 流程。
+        
+        Args:
+            items: 列表，每个 item 包含:
+                - image_path: 图片路径
+                - uncertain_body_part_annotation: 不确定身体部位的列表或字符串
+                
+        Returns:
+            处理后的 items 列表
+        """
+        # 第一步：过滤，分离需要处理和不需要处理的 items
+        items_to_process = []  # (index, annotations)
+        
+        for i, item in enumerate(items):
+            annotations = item.get('uncertain_body_part_annotation', [])
+            
+            # 过滤：跳过不需要处理的情况
+            if isinstance(annotations, str):
+                item['grounding_skipped'] = True
+                item['grounding_skip_reason'] = annotations
+                continue
+            
+            if not annotations or len(annotations) == 0:
+                item['grounding_skipped'] = True
+                item['grounding_skip_reason'] = "no_uncertain_body_parts"
+                continue
+            
+            image_path = item.get('image_path')
+            if not image_path or not os.path.exists(image_path):
+                item['grounding_skipped'] = True
+                item['grounding_skip_reason'] = "image_not_found"
+                continue
+            
+            # 有不确定的身体部位，需要处理
+            item['grounding_skipped'] = False
+            items_to_process.append((i, annotations))
+        
+        if not items_to_process:
+            print("No items need grounding processing.")
+            return items
+        
+        print(f"Grounding: {len(items_to_process)} items need processing (out of {len(items)} total)")
+        
+        # 第二步：收集所有需要检测人物的任务
+        person_tasks = []
+        task_mapping = []  # (item_idx, part_idx)
+        
+        for item_idx, annotations in items_to_process:
+            image_path = items[item_idx].get('image_path')
+            for part_idx, part in enumerate(annotations):
+                if 'person_bbox' not in part:
+                    person_tasks.append({
+                        'image_path': image_path,
+                        'person_description': part.get('person_description', '')
+                    })
+                    task_mapping.append((item_idx, part_idx))
+        
+        # 第三步：批量检测人物
+        if person_tasks:
+            print(f"Batch detecting {len(person_tasks)} persons...")
+            person_results = self.detect_person_batch(person_tasks)
+            
+            # 将结果写回
+            for (item_idx, part_idx), bbox in zip(task_mapping, person_results):
+                items[item_idx]['uncertain_body_part_annotation'][part_idx]['person_bbox'] = bbox
+        
+        # 第四步：收集所有需要检测物品的任务
+        object_tasks = []
+        obj_task_mapping = []  # (item_idx, part_idx)
+        
+        for item_idx, _ in items_to_process:
+            image_path = items[item_idx].get('image_path')
+            annotations = items[item_idx]['uncertain_body_part_annotation']
+            
+            for part_idx, part in enumerate(annotations):
+                person_bbox = part.get('person_bbox')
+                obj_name = part.get('interaction_object')
+                
+                # 只有人物检测成功且有交互物品时才检测物品
+                if person_bbox and obj_name and 'object_bboxes' not in part:
+                    object_tasks.append({
+                        'image_path': image_path,
+                        'object_name': obj_name,
+                        'roi_bbox': person_bbox
+                    })
+                    obj_task_mapping.append((item_idx, part_idx))
+        
+        # 第五步：批量检测物品
+        if object_tasks:
+            print(f"Batch detecting {len(object_tasks)} objects...")
+            object_results = self.detect_object_in_roi_batch(object_tasks)
+            
+            # 将结果写回
+            for (item_idx, part_idx), obj_bboxes in zip(obj_task_mapping, object_results):
+                part = items[item_idx]['uncertain_body_part_annotation'][part_idx]
+                part['object_bboxes'] = obj_bboxes
+                part['object_bbox'] = obj_bboxes[0] if obj_bboxes else None
+        
+        # 第六步：标记 grounding 有效性
+        for item_idx, _ in items_to_process:
+            annotations = items[item_idx]['uncertain_body_part_annotation']
+            for part in annotations:
+                if part.get('person_bbox') is None:
+                    part['grounding_valid'] = False
+                    part['grounding_error'] = "Invalid: person detection failed (0 or multiple persons)"
+                else:
+                    part['grounding_valid'] = True
+        
+        return items
