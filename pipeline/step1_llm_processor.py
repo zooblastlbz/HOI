@@ -88,6 +88,25 @@ Example structure:
 # Task
 Identify human body parts in the caption where the spatial location (left/right) is NOT specified (i.e., "uncertain"). For each identified part, extract the associated person, interaction object, and interaction type.
 
+# Allowed Body Parts (IMPORTANT)
+You can ONLY output body parts from the following list (without left/right prefix):
+- nose
+- eye
+- ear
+- shoulder
+- elbow
+- wrist
+- hip
+- knee
+- ankle
+
+Map common terms to these allowed parts:
+- "hand" → "wrist"
+- "arm" → "elbow" or "wrist" (depending on context)
+- "leg" → "knee" or "ankle" (depending on context)
+- "foot" → "ankle"
+- "face" → "nose" or "eye" (depending on context)
+
 # Instructions
 
 1. **Filter for Uncertainty**:
@@ -97,11 +116,24 @@ Identify human body parts in the caption where the spatial location (left/right)
    - *Exclude*: "holding a cup with left hand" (already certain), "dog wagging tail" (not human).
 
 2. **Extract Visual Descriptions**:
-   - **Person**: Use the FULL VISUAL DESCRIPTION from the <Role> section for the corresponding ID. This will be used directly for visual grounding (segmentation).
-   - **Object**: Extract a CONCISE VISUAL description of the interacting object, including its relationship to the person.
-     - Format: "[object features] + [relationship to person]"
-     - Example: "the white cup held by the man in black jacket"
-     - *Critical Rule*: If the caption implies multiple similar objects (e.g., "two chairs") and does not specify which one (e.g., "sitting on a chair"), set this to `null`. Only extract if the object is uniquely identifiable from the text.
+   - **Person (two versions required)**:
+     - `person_description_full`: The FULL VISUAL DESCRIPTION from the <Role> section (original, complete).
+     - `person_description`: A **CONCISE** version (5-8 words) with KEY DISTINCTIVE features.
+       - Focus on: clothing color, unique accessories, or standout features.
+       - **Good examples**: "man in black jacket", "woman with red hat", "boy in white shirt"
+       - **Bad examples**: "A Caucasian adult male with an average build, wearing..." (too long)
+   
+   - **Object**: Extract a **CONCISE** description that links the object to the person.
+     - **Format**: "[object visual features] [relation] [person's key feature]"
+     - **Keep it SHORT**: Max 8-10 words.
+     - **Good examples**: 
+       - "red cup held by man in black jacket"
+       - "umbrella near woman in red dress"
+       - "basketball touched by boy in white shirt"
+     - **Bad examples**: 
+       - "cup" (no person link, not distinctive)
+       - "the white cup that is being held by the man wearing a black jacket and blue jeans" (too long)
+     - *Critical Rule*: If the object cannot be uniquely identified (e.g., "one of two chairs"), set to `null`.
 
 3. **Classify Interaction**:
    Determine the nature of the interaction to guide the grounding strategy. Assign one or both categories:
@@ -109,24 +141,36 @@ Identify human body parts in the caption where the spatial location (left/right)
    - `"directional_orientation"`: Pointing, looking, or facing towards an object (often at a distance). Strategy: Use limb direction/vector.
 
 # Output Format
-Return a JSON object:
+**IMPORTANT: You MUST output ONLY valid JSON. Do not include any explanation, markdown formatting, or text outside the JSON object.**
 
+Output a single JSON object with the following structure:
+```json
 {{
     "uncertain_parts": [
         {{
             "person_id": "ID_A",
-            "person_description": "full description from <Role> section",
-            "body_part": "hand/arm/leg/foot/...",
-            "interaction_object": "object description with context, or null",
+            "person_description_full": "complete original description from <Role> section",
+            "person_description": "concise 5-8 word description for grounding",
+            "body_part": "one of: nose/eye/ear/shoulder/elbow/wrist/hip/knee/ankle",
+            "interaction_object": "concise description linking object to person, or null",
             "text_span": "relevant text from caption",
             "interaction_category": ["close_proximity", "directional_orientation"]
         }}
     ]
 }}
+```
 
 # Special Cases
 - If there are people but ALL body parts already have left/right specified, return:
+  ```json
   {{"uncertain_parts": "all_body_parts_already_specified"}}
+  ```
+- If no uncertain body parts are found, return:
+  ```json
+  {{"uncertain_parts": []}}
+  ```
+
+# Response
 """
 
     def load_model(self):
@@ -150,6 +194,61 @@ Return a JSON object:
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
             print("Model unloaded.")
+
+    def _extract_json(self, text):
+        """
+        从 LLM 输出中提取 JSON 对象。
+        支持多种格式：纯 JSON、markdown 代码块、带有额外文本等。
+        """
+        text = text.strip()
+        
+        # 尝试方法1：直接解析（纯 JSON 输出）
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            pass
+        
+        # 尝试方法2：提取 ```json ... ``` 代码块
+        json_block_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', text, re.DOTALL)
+        if json_block_match:
+            try:
+                return json.loads(json_block_match.group(1))
+            except json.JSONDecodeError:
+                pass
+        
+        # 尝试方法3：找到第一个 { 和最后一个 } 之间的内容
+        start = text.find('{')
+        end = text.rfind('}')
+        if start != -1 and end != -1 and end > start:
+            try:
+                json_str = text[start:end+1]
+                return json.loads(json_str)
+            except json.JSONDecodeError:
+                pass
+        
+        # 尝试方法4：逐行查找，处理可能的多个 JSON 对象
+        lines = text.split('\n')
+        json_lines = []
+        in_json = False
+        brace_count = 0
+        
+        for line in lines:
+            if '{' in line and not in_json:
+                in_json = True
+            if in_json:
+                json_lines.append(line)
+                brace_count += line.count('{') - line.count('}')
+                if brace_count == 0:
+                    try:
+                        json_str = '\n'.join(json_lines)
+                        return json.loads(json_str)
+                    except json.JSONDecodeError:
+                        json_lines = []
+                        in_json = False
+                        brace_count = 0
+        
+        # 所有方法都失败
+        return None
 
     def process_batch(self, items):
         """
@@ -194,29 +293,33 @@ Return a JSON object:
         for idx, output in zip(indices_to_process, outputs):
             generated_text = output.outputs[0].text
             try:
-                # Simple JSON extraction
-                text = generated_text.strip()
-                start = text.find('{')
-                end = text.rfind('}')
-                if start != -1 and end != -1:
-                    json_str = text[start:end+1]
-                    result = json.loads(json_str)
-                    uncertain_parts = result.get("uncertain_parts", [])
-                    
-                    # 处理特殊情况
-                    if isinstance(uncertain_parts, str):
-                        # LLM 返回了字符串（如 "all_body_parts_already_specified"）
-                        items[idx]['uncertain_body_part_annotation'] = uncertain_parts
-                    elif isinstance(uncertain_parts, list) and len(uncertain_parts) == 0:
-                        # 有人物但没有不确定的身体部位
-                        items[idx]['uncertain_body_part_annotation'] = "all_body_parts_already_specified"
-                    else:
-                        items[idx]['uncertain_body_part_annotation'] = uncertain_parts
-                else:
+                # 使用增强的 JSON 提取方法
+                result = self._extract_json(generated_text)
+                
+                if result is None:
+                    print(f"Warning: Failed to extract JSON for item {idx}")
+                    print(f"Raw output: {generated_text[:200]}...")
                     items[idx]['uncertain_body_part_annotation'] = []
+                    items[idx]['llm_parse_error'] = "failed_to_extract_json"
+                    continue
+                
+                uncertain_parts = result.get("uncertain_parts", [])
+                
+                # 处理特殊情况
+                if isinstance(uncertain_parts, str):
+                    # LLM 返回了字符串（如 "all_body_parts_already_specified"）
+                    items[idx]['uncertain_body_part_annotation'] = uncertain_parts
+                elif isinstance(uncertain_parts, list) and len(uncertain_parts) == 0:
+                    # 有人物但没有不确定的身体部位
+                    items[idx]['uncertain_body_part_annotation'] = "all_body_parts_already_specified"
+                else:
+                    items[idx]['uncertain_body_part_annotation'] = uncertain_parts
+                    
             except Exception as e:
                 print(f"Error parsing output for item {idx}: {e}")
+                print(f"Raw output: {generated_text}...")
                 items[idx]['uncertain_body_part_annotation'] = []
+                items[idx]['llm_parse_error'] = str(e)
         
         # Cleanup
         self.unload_model()

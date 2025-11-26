@@ -2,7 +2,7 @@
 # 运行 Step 1: LLM 分析
 
 # 配置参数
-INPUT_DATA="/ytech_m2v5_hdd/workspace/kling_mm/dingyue08/spatial-r1/HOI/HOI/data/mini_dataset_100/lmdb"                    # 输入数据文件或LMDB目录
+INPUT_DATA="/ytech_m2v5_hdd/workspace/kling_mm/dingyue08/spatial-r1/HOI/HOI/data/mini_dataset_100/dataset.json"                    # 输入数据文件或LMDB目录
 OUTPUT_DIR="/ytech_m2v5_hdd/workspace/kling_mm/dingyue08/spatial-r1/HOI/HOI/output"                      # 输出目录
 NUM_SAMPLES=""                            # 处理样本数量（留空则处理全部）
 
