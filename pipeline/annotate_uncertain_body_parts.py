@@ -24,17 +24,46 @@ def get_uncertain_body_parts(client, model, caption):
        - Example: "holding a cup with hand" -> "hand" is uncertain.
        - Example: "holding a cup with left hand" -> NOT uncertain.
        - Example: "holding a bag in the other hand" (if context implies left/right is unknown) -> "hand" is uncertain.
-    3. Identify the person to whom the body part belongs. This is crucial for multi-person scenarios.
-       - Extract the specific phrase describing the person (e.g., "A man", "The woman in the red shirt", "The boy").
-    4. Classify the interaction into categories to help decide the visual grounding strategy. If the situation is ambiguous or fits both descriptions, include BOTH categories:
+    
+    3. **Person Description (for SAM grounding)**:
+       - Keep it SHORT and VISUALLY DISTINCTIVE (2-4 words)
+       - Focus on the most distinguishing visual features: clothing color, gender, role
+       - Examples:
+         - "man in black jacket" ✓
+         - "woman in red dress" ✓
+         - "worker in orange vest" ✓
+         - "child with blue backpack" ✓
+    
+    4. **Action Description (for SAM grounding)**:
+       - Keep it SHORT and DISTINCTIVE (2-4 words)
+       - Format: "[action_verb] [key_object/target]"
+       - Examples:
+         - "holding red cup" ✓
+         - "kicking soccer ball" ✓
+         - "touching wooden table" ✓
+         - "pointing at sign" ✓
+    
+    5. **Interaction Object (for SAM grounding)**:
+       - Keep it SHORT and VISUALLY DISTINCTIVE (2-4 words)
+       - Focus on visual attributes: color, size, material, type
+       - Set to null if NO physical object is involved
+       - Examples:
+         - "red coffee cup" ✓
+         - "white soccer ball" ✓
+         - "wooden table" ✓
+         - "black smartphone" ✓
+    
+    6. Classify the interaction into categories to help decide the visual grounding strategy. If the situation is ambiguous or fits both descriptions, include BOTH categories:
        - "object_interaction": The body part is actively manipulating, touching, or pointing at a specific object. (e.g., holding a cup, kicking a ball, touching a table, pointing at a sign). This implies we can use object grounding (detecting the object) to help identify the body part (left vs right).
        - "spatial_proximity": The body part is described by its spatial proximity to an object or its general posture/position, without active manipulation. (e.g., hand near the wall, arm raised, leg bent, standing next to a car). This implies we should rely more on pose/skeleton estimation to determine the side.
-    5. Output a JSON object with a key "uncertain_parts" containing a list of objects.
-    6. Each object in the list should have:
-       - "body_part": The body part mentioned (e.g., "hand", "leg", "arm", "torso").
-       - "person_description": The text description of the person this body part belongs to (e.g., "A man", "The girl").
-       - "interaction_object": The object interacting with the body part (or null if none).
-       - "text_span": The exact phrase or segment in the caption that refers to this action/body part (e.g., "holding a cup with his hand").
+    
+    7. Output a JSON object with a key "uncertain_parts" containing a list of objects.
+    8. Each object in the list should have:
+       - "body_part": The body part mentioned (e.g., "hand", "leg", "arm", "foot").
+       - "person_description": Concise 2-4 word visual description for grounding (e.g., "man in black jacket").
+       - "action": Short 2-4 word action phrase for grounding (e.g., "holding red cup").
+       - "interaction_object": Short 2-4 word object description for grounding, or null if none (e.g., "red coffee cup").
+       - "text_span": The exact phrase or segment in the caption that refers to this action/body part.
        - "interaction_category": A LIST containing one or both of ["object_interaction", "spatial_proximity"].
     
     Example Output:
@@ -42,17 +71,27 @@ def get_uncertain_body_parts(client, model, caption):
         "uncertain_parts": [
             {{
                 "body_part": "hand", 
-                "person_description": "A man",
-                "interaction_object": "cup",
+                "person_description": "man in blue shirt",
+                "action": "holding coffee cup",
+                "interaction_object": "red coffee cup",
                 "text_span": "holding a cup with his hand",
                 "interaction_category": ["object_interaction"]
             }},
             {{
                 "body_part": "foot", 
-                "person_description": "The woman in red",
-                "interaction_object": "soccer ball",
+                "person_description": "woman in red dress",
+                "action": "kicking soccer ball",
+                "interaction_object": "white soccer ball",
                 "text_span": "kicking a soccer ball",
                 "interaction_category": ["object_interaction"]
+            }},
+            {{
+                "body_part": "hand", 
+                "person_description": "worker in orange vest",
+                "action": "near concrete wall",
+                "interaction_object": null,
+                "text_span": "hand near the wall",
+                "interaction_category": ["spatial_proximity"]
             }}
         ]
     }}

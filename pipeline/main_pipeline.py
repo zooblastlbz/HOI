@@ -1,5 +1,4 @@
 import json
-import math
 import os
 import sys
 import argparse
@@ -20,15 +19,12 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from step1_llm_processor import LLMProcessor
 from step2_grounding import GroundingModule
-from step3_pose_estimation import PoseModule
 
 class HOIPipeline:
     def __init__(self, llm_model_path=None, 
                  llm_tensor_parallel_size=1,
                  sam_model_path="facebook/sam3-demo",
-                 sam_gpu_ids=None, sam_batch_size=1,
-                 yolo_model_path="yolo11n-pose.pt",
-                 yolo_gpu_ids=None, yolo_batch_size=1):
+                 sam_gpu_ids=None, sam_batch_size=1):
         """
         初始化 HOI Pipeline (延迟加载模式)
         
@@ -38,9 +34,6 @@ class HOIPipeline:
             sam_model_path: SAM3模型路径或HuggingFace ID
             sam_gpu_ids: SAM使用的GPU ID列表，如 [0, 1, 2]
             sam_batch_size: SAM的batch size
-            yolo_model_path: YOLO模型路径
-            yolo_gpu_ids: YOLO使用的GPU ID列表，如 [0, 1]
-            yolo_batch_size: YOLO的batch size
         """
         # 保存配置，延迟加载模型
         self.llm_model_path = llm_model_path
@@ -48,14 +41,10 @@ class HOIPipeline:
         self.sam_model_path = sam_model_path
         self.sam_gpu_ids = sam_gpu_ids
         self.sam_batch_size = sam_batch_size
-        self.yolo_model_path = yolo_model_path
-        self.yolo_gpu_ids = yolo_gpu_ids
-        self.yolo_batch_size = yolo_batch_size
         
         # 模型实例，延迟初始化
         self._llm = None
         self._grounding = None
-        self._pose = None
 
     @property
     def llm(self):
@@ -79,18 +68,6 @@ class HOIPipeline:
                 batch_size=self.sam_batch_size
             )
         return self._grounding
-
-    @property
-    def pose(self):
-        """延迟加载 Pose 模块"""
-        if self._pose is None:
-            print("Initializing Pose (YOLO) module...")
-            self._pose = PoseModule(
-                model_path=self.yolo_model_path, 
-                gpu_ids=self.yolo_gpu_ids, 
-                batch_size=self.yolo_batch_size
-            )
-        return self._pose
 
     def load_lmdb_data(self, lmdb_path, num_samples=None):
         if lmdb is None:
@@ -136,7 +113,6 @@ class HOIPipeline:
                     if isinstance(f_list, str): f_list = [f_list]
                     
                     if not f_list:
-                        # print("Skipping: No frame_dir_list found.")
                         continue
 
                     raw_path = f_list[0]
@@ -173,36 +149,6 @@ class HOIPipeline:
         env.close()
         print(f"Loaded {len(data_list)} items from LMDB.")
         return data_list
-
-    def calculate_distance(self, point1, point2):
-        return math.sqrt((point1[0] - point2[0])**2 + (point1[1] - point2[1])**2)
-
-    def resolve_side(self, keypoints, object_bbox):
-        """
-        Determine if it's left or right hand based on distance to object center.
-        """
-        if not object_bbox:
-            return "unknown"
-        
-        # Calculate object center
-        obj_center = [
-            (object_bbox[0] + object_bbox[2]) / 2,
-            (object_bbox[1] + object_bbox[3]) / 2
-        ]
-
-        left_wrist = keypoints.get("left_wrist")
-        right_wrist = keypoints.get("right_wrist")
-
-        if not left_wrist or not right_wrist:
-            return "unknown (missing keypoints)"
-
-        dist_left = self.calculate_distance(left_wrist, obj_center)
-        dist_right = self.calculate_distance(right_wrist, obj_center)
-
-        if dist_left < dist_right:
-            return "left"
-        else:
-            return "right"
 
     def run_step(self, step_name, process_func, input_file, output_file, batch_mode=False, num_samples=None):
         print(f"\n=== Running {step_name} ===")
@@ -279,8 +225,6 @@ class HOIPipeline:
                 
         # Combine and Save
         final_data = processed_data + new_results
-        # Sort by ID if possible to keep order
-        # final_data.sort(key=lambda x: x.get('id', 0)) 
         
         os.makedirs(os.path.dirname(output_file), exist_ok=True)
         with open(output_file, 'w') as f:
@@ -288,16 +232,46 @@ class HOIPipeline:
         print(f"Saved results to {output_file}")
 
     def process_step1_llm(self, items):
-        # Batch processing for LLM
-        return self.llm.process_batch(items)
+        """
+        Step 1: LLM 分析 caption，提取不确定的身体部位信息
+        
+        输入 item 需要包含:
+            - caption: 图片描述文本
+            
+        输出增加:
+            - uncertain_parts: 提取的身体部位列表，每个包含:
+                - person_id, person_full_description, person_brief_description
+                - body_part, laterality_specified, original_laterality
+                - action_description, interaction_object, interaction_type
+                - text_span
+            - person_id_mapping: 人物ID到描述的映射
+        """
+        result = self.llm.process_batch(items)
+        # 将 uncertain_body_part_annotation 重命名为 uncertain_parts 以保持一致
+        for item in result:
+            if 'uncertain_body_part_annotation' in item:
+                item['uncertain_parts'] = item.pop('uncertain_body_part_annotation')
+        return result
 
     def process_step2_grounding(self, items):
-        # Batch processing for Grounding
+        """
+        Step 2: Visual Grounding + 左右判定
+        
+        输入 item 需要包含:
+            - image_path: 图片路径
+            - uncertain_parts: Step1 的输出
+            
+        输出增加:
+            - person_bbox: 人物边界框
+            - object_bboxes: 物体边界框列表
+            - body_part_bbox: 身体部位边界框
+            - left_body_part_bbox, right_body_part_bbox: 左右身体部位边界框
+            - body_part_count, left_body_part_count, right_body_part_count: 检测数量
+            - final_laterality: 最终左右判定
+            - final_body_part_bbox: 最终身体部位边界框
+            - laterality_valid: 判定是否有效
+        """
         return self.grounding.process_items_batch(items)
-
-    def process_step3_pose(self, items):
-        # Batch processing for Pose Estimation
-        return self.pose.process_items_batch(items)
 
     def check_input_compatibility(self, file_path, step):
         if not os.path.exists(file_path):
@@ -311,11 +285,7 @@ class HOIPipeline:
                     return False
                 item = data[0]
                 if step == 2:
-                    return 'uncertain_body_part_annotation' in item
-                if step == 3:
-                    annotations = item.get('uncertain_body_part_annotation', [])
-                    if not annotations: return True
-                    return 'person_bbox' in annotations[0]
+                    return 'uncertain_parts' in item
         except:
             return False
         return True
@@ -323,48 +293,29 @@ class HOIPipeline:
     def run_pipeline(self, input_file, output_dir, num_samples=None, step=None):
         step1_out = os.path.join(output_dir, "step1_llm.json")
         step2_out = os.path.join(output_dir, "step2_grounding.json")
-        step3_out = os.path.join(output_dir, "step3_final.json")
         
+        # 确定每个步骤的输入文件
+        # Step 1: 使用用户指定的输入
         in_s1 = input_file
-        
-        # Smart input detection for Step 2
+        # Step 2: 使用 Step 1 的输出
         in_s2 = step1_out
-        if step == 2:
-            in_s2 = input_file
-            if not self.check_input_compatibility(in_s2, 2) and os.path.exists(step1_out):
-                print(f"Input {in_s2} not compatible with Step 2. Auto-switching to {step1_out}")
-                in_s2 = step1_out
-                
-        # Smart input detection for Step 3
-        in_s3 = step2_out
-        if step == 3:
-            in_s3 = input_file
-            if not self.check_input_compatibility(in_s3, 3) and os.path.exists(step2_out):
-                print(f"Input {in_s3} not compatible with Step 3. Auto-switching to {step2_out}")
-                in_s3 = step2_out
 
         if step is None or step == 1:
             self.run_step("Step 1: LLM Analysis", self.process_step1_llm, in_s1, step1_out, batch_mode=True, num_samples=num_samples)
         
         if step is None or step == 2:
-            self.run_step("Step 2: Visual Grounding", self.process_step2_grounding, in_s2, step2_out, batch_mode=True, num_samples=num_samples)
-            
-        if step is None or step == 3:
-            self.run_step("Step 3: Pose & Resolution", self.process_step3_pose, in_s3, step3_out, batch_mode=True, num_samples=num_samples)
+            self.run_step("Step 2: Visual Grounding & Laterality Decision", self.process_step2_grounding, in_s2, step2_out, batch_mode=True, num_samples=num_samples)
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description="HOI Pipeline: Extract and ground body parts from image captions")
     parser.add_argument("--input", default="data.json", help="Input data file or LMDB directory")
     parser.add_argument("--output_dir", default="results", help="Directory to save intermediate and final results")
-    parser.add_argument("--llm_model", default="facebook/opt-125m", help="Path to local LLM model for vLLM")
     parser.add_argument("--num_samples", type=int, default=None, help="Number of samples to process from LMDB")
-    parser.add_argument("--step", type=int, default=None, choices=[1, 2, 3], help="Run a specific step (1, 2, or 3). If not specified, runs all steps.")
+    parser.add_argument("--step", type=int, default=None, choices=[1, 2], help="Run a specific step (1 or 2). If not specified, runs all steps.")
     
     # 模型路径配置
-    parser.add_argument("--sam_model", default="facebook/sam3-demo", 
-                        help="Path to SAM3 model or HuggingFace model ID")
-    parser.add_argument("--yolo_model", default="yolo11n-pose.pt", 
-                        help="Path to YOLO pose model")
+    parser.add_argument("--llm_model", default="facebook/opt-125m", help="Path to local LLM model for vLLM")
+    parser.add_argument("--sam_model", default="facebook/sam3-demo", help="Path to SAM3 model or HuggingFace model ID")
     
     # GPU 配置参数
     parser.add_argument("--llm_tensor_parallel_size", type=int, default=1, 
@@ -373,25 +324,17 @@ if __name__ == "__main__":
                         help="Comma-separated GPU IDs for SAM model (e.g., '0,1,2')")
     parser.add_argument("--sam_batch_size", type=int, default=1, 
                         help="Batch size for SAM model")
-    parser.add_argument("--yolo_gpu_ids", type=str, default="0", 
-                        help="Comma-separated GPU IDs for YOLO model (e.g., '0,1')")
-    parser.add_argument("--yolo_batch_size", type=int, default=1, 
-                        help="Batch size for YOLO model")
     
     args = parser.parse_args()
     
     # 解析 GPU ID 列表
     sam_gpu_ids = [int(x.strip()) for x in args.sam_gpu_ids.split(',') if x.strip()]
-    yolo_gpu_ids = [int(x.strip()) for x in args.yolo_gpu_ids.split(',') if x.strip()]
     
     pipeline = HOIPipeline(
         llm_model_path=args.llm_model,
         llm_tensor_parallel_size=args.llm_tensor_parallel_size,
         sam_model_path=args.sam_model,
         sam_gpu_ids=sam_gpu_ids,
-        sam_batch_size=args.sam_batch_size,
-        yolo_model_path=args.yolo_model,
-        yolo_gpu_ids=yolo_gpu_ids,
-        yolo_batch_size=args.yolo_batch_size
+        sam_batch_size=args.sam_batch_size
     )
     pipeline.run_pipeline(args.input, args.output_dir, num_samples=args.num_samples, step=args.step)

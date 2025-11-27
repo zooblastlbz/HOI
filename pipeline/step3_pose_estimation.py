@@ -148,7 +148,7 @@ class PoseModule:
             return [{} for _ in items]
 
         results_list = []
-        
+       
         # Process in batches
         for i in range(0, len(items), self.batch_size):
             batch = items[i:i + self.batch_size]
@@ -217,6 +217,7 @@ class PoseModule:
             处理后的 items 列表
         """
         # 第一步：过滤，分离需要处理和不需要处理的 items
+        print(f"Batch processing {len(items)} items for pose estimation...")
         items_to_process = []  # (index, annotations)
         
         for i, item in enumerate(items):

@@ -58,7 +58,7 @@ class LLMProcessor:
             id_list_str = "\n".join(id_items)
         
         return f"""# Role
-You are an expert linguistic analyst for computer vision tasks. Your goal is to extract structured information from image captions to assist in visual grounding and pose estimation.
+You are an expert linguistic analyst for computer vision tasks. Your goal is to extract all body parts involved in actions/interactions from image captions, normalizing laterality information.
 
 # Caption Format
 The caption uses XML-like tags:
@@ -70,15 +70,6 @@ The caption uses XML-like tags:
 
 **Important**: In sections other than <Role> (such as <Event>, <Scene>), people are referenced using ID placeholders like <ID_A>, <ID_B>. You need to look up their full descriptions in the <Role> section.
 
-Example structure:
-```
-<Event><ID_A> is holding a cup while <ID_B> watches.</Event>
-<Role><ID_A>: A man in black jacket and blue jeans. <ID_B>: A woman in red dress.</Role>
-<Background>A coffee shop interior.</Background>
-<style>Realistic style with warm lighting.</style>
-<Scene><ID_A> is in the center, <ID_B> is on the right side.</Scene>
-```
-
 # Input Caption
 "{caption}"
 
@@ -86,89 +77,135 @@ Example structure:
 {id_list_str if id_list_str else "No person IDs found in <Role> section."}
 
 # Task
-Identify human body parts in the caption where the spatial location (left/right) is NOT specified (i.e., "uncertain"). For each identified part, extract the associated person, interaction object, and interaction type.
+Analyze the caption and extract ALL human body parts involved in actions or interactions.
+For each body part:
+1. Extract the interaction details (object, text span, interaction type, person)
+2. **NORMALIZE the body part name by REMOVING any laterality (left/right) information**
+3. Record whether laterality was originally specified in the caption
+4. **Include the FULL person description from <Role> section**
+5. **Include a BRIEF person description for grounding**
 
-# Allowed Body Parts (IMPORTANT)
-You can ONLY output body parts from the following list (without left/right prefix):
-- nose
-- eye
-- ear
-- shoulder
-- elbow
-- wrist
-- hip
-- knee
-- ankle
+# Laterality Normalization Rules
+**ALWAYS normalize body part names by removing left/right:**
+- "left hand" → body_part: "hand of ...", laterality_specified: true
+- "right foot" → body_part: "foot of ...", laterality_specified: true  
+- "left arm" → body_part: "arm of ...", laterality_specified: true
+- "right leg" → body_part: "leg of ...", laterality_specified: true
+- "hand" (unspecified) → body_part: "hand of ...", laterality_specified: false
+- "both hands" → DO NOT extract (see exclusion rules below)
 
-Map common terms to these allowed parts:
-- "hand" → "wrist"
-- "arm" → "elbow" or "wrist" (depending on context)
-- "leg" → "knee" or "ankle" (depending on context)
-- "foot" → "ankle"
-- "face" → "nose" or "eye" (depending on context)
+# What NOT to Extract (Exclusion Rules)
+1. **Both hands/feet doing the SAME action on the SAME object**: 
+   - "holding a box with both hands" → DO NOT extract
+   - "carrying a tray with two hands" → DO NOT extract
+   - "hands gripping the steering wheel" → DO NOT extract
+2. **Symmetric actions where left/right doesn't matter**:
+   - "clapping hands" → DO NOT extract
+   - "folding arms" → DO NOT extract
+3. **Non-lateral body parts**: "head", "face", "back", "chest", "torso" → DO NOT extract (no left/right distinction)
 
-# Instructions
+# What TO Extract
+1. **Any single body part action (with or without laterality specified)**:
+   - "holding a cup" → extract as "hand of ..."
+   - "left hand holding a cup" → extract as "hand of ..." (laterality_specified: true)
+   - "right foot kicking the ball" → extract as "foot of ..." (laterality_specified: true)
+2. **Two body parts doing DIFFERENT actions or with DIFFERENT objects → Extract as TWO separate entries**:
+   - "left hand holds phone, right hand holds cup" → extract TWO entries
+   - "holds a phone and a cup" → extract TWO entries
+   - "left hand waving, right hand holding bag" → extract TWO entries (different actions)
+   - "kicking with left foot while balancing on right foot" → extract TWO entries
 
-1. **Filter for Uncertainty**:
-   - Only select body parts belonging to **humans** (referenced as <ID_A>, <ID_B>, etc.).
-   - Only select body parts where the side ('left' or 'right') is **missing**.
-   - *Include*: "holding a cup with hand", "kicking with leg", "reaching with arm".
-   - *Exclude*: "holding a cup with left hand" (already certain), "dog wagging tail" (not human).
+# Annotation Rules (ALL descriptions must be ≤32 tokens)
 
-2. **Extract Visual Descriptions**:
-   - **Person (two versions required)**:
-     - `person_description_full`: The FULL VISUAL DESCRIPTION from the <Role> section (original, complete).
-     - `person_description`: A **CONCISE** version (5-8 words) with KEY DISTINCTIVE features.
-       - Focus on: clothing color, unique accessories, or standout features.
-       - **Good examples**: "man in black jacket", "woman with red hat", "boy in white shirt"
-       - **Bad examples**: "A Caucasian adult male with an average build, wearing..." (too long)
-   
-   - **Object**: Extract a **CONCISE** description that links the object to the person.
-     - **Format**: "[object visual features] [relation] [person's key feature]"
-     - **Keep it SHORT**: Max 8-10 words.
-     - **Good examples**: 
-       - "red cup held by man in black jacket"
-       - "umbrella near woman in red dress"
-       - "basketball touched by boy in white shirt"
-     - **Bad examples**: 
-       - "cup" (no person link, not distinctive)
-       - "the white cup that is being held by the man wearing a black jacket and blue jeans" (too long)
-     - *Critical Rule*: If the object cannot be uniquely identified (e.g., "one of two chairs"), set to `null`.
+## 1. body_part
+- **Format: "[body_part] of [person_brief_description]"**
+- The body part name should be NORMALIZED (no left/right): "hand", "foot", "arm", "leg", "finger", "knee", "elbow", "shoulder"
+- Append " of [person_brief_description]" to identify which person
+- Example: "hand of man in blue shirt", "foot of woman in red dress"
+- **NEVER include "left", "right", or "both" in this field**
 
-3. **Classify Interaction**:
-   Determine the nature of the interaction to guide the grounding strategy. Assign one or both categories:
-   - `"close_proximity"`: Physical contact or close distance (e.g., holding, touching, kicking, carrying). Strategy: Use distance to object.
-   - `"directional_orientation"`: Pointing, looking, or facing towards an object (often at a distance). Strategy: Use limb direction/vector.
+## 2. laterality_specified
+- `true` if the original caption explicitly mentioned "left" or "right" for this body part
+- `false` if the laterality was not specified in the caption
+
+## 3. original_laterality
+- The original laterality from caption: "left", "right", or "unspecified"
+- This preserves the original information for reference
+
+## 4. text_span
+- The exact text from the caption that describes this action
+- Keep it minimal but complete enough to identify the action
+
+## 5. action_description (for SAM grounding, ≤32 tokens)
+- Describe the body part performing the action for visual grounding
+- Format: "[person descriptor]'s [body part] [action context]"
+- **Use normalized body part name (without left/right)**
+- Example: "man's hand holding the cup", "woman's foot kicking the ball"
+
+## 6. interaction_object (≤32 tokens)
+- The object or person being interacted with
+- Keep it SHORT and VISUALLY DISTINCTIVE (2-5 words)
+- Set to `null` if no physical interaction (e.g., waving alone)
+
+## 7. interaction_type
+- One of: "holding", "touching", "pointing", "kicking", "carrying", "reaching", "waving", "grasping", "pushing", "pulling", "other"
+
+## 8. person_id
+- The person ID from the caption (e.g., "ID_A", "ID_B")
+
+## 9. person_full_description
+- **The COMPLETE description from <Role> section for this person**
+- Copy the full text exactly as it appears in <Role>
+
+## 10. person_brief_description (for SAM grounding, ≤10 tokens)
+- **A SHORT but DISTINCTIVE description for visual grounding**
+- Extract the MOST VISUALLY DISTINCTIVE features that differentiate this person from others
+- Focus on: clothing color, unique accessories, or notable physical features
+- Format: "[gender/age] in [most distinctive clothing/feature]"
 
 # Output Format
-**IMPORTANT: You MUST output ONLY valid JSON. Do not include any explanation, markdown formatting, or text outside the JSON object.**
+**IMPORTANT: Output ONLY valid JSON. No explanation or markdown.**
 
-Output a single JSON object with the following structure:
 ```json
 {{
     "uncertain_parts": [
         {{
             "person_id": "ID_A",
-            "person_description_full": "complete original description from <Role> section",
-            "person_description": "concise 5-8 word description for grounding",
-            "body_part": "one of: nose/eye/ear/shoulder/elbow/wrist/hip/knee/ankle",
-            "interaction_object": "concise description linking object to person, or null",
-            "text_span": "relevant text from caption",
-            "interaction_category": ["close_proximity", "directional_orientation"]
+            "person_full_description": "A young Asian man wearing a blue polo shirt and khaki pants",
+            "person_brief_description": "man in blue polo shirt",
+            "body_part": "hand of man in blue polo shirt",
+            "laterality_specified": true,
+            "original_laterality": "left",
+            "text_span": "holding a phone in his left hand",
+            "action_description": "man's hand holding phone",
+            "interaction_object": "phone",
+            "interaction_type": "holding"
         }}
     ]
 }}
 ```
 
-# Special Cases
-- If there are people but ALL body parts already have left/right specified, return:
-  ```json
-  {{"uncertain_parts": "all_body_parts_already_specified"}}
-  ```
-- If no uncertain body parts are found, return:
-  ```json
-  {{"uncertain_parts": []}}
-  ```
+# Field Descriptions Summary
+
+| Field | Description | When to return empty/null |
+|-------|-------------|---------------------------|
+| `person_id` | Person ID from caption (e.g., "ID_A") | Never empty if extracting |
+| `person_full_description` | Complete description from <Role> section | Never empty if extracting |
+| `person_brief_description` | Short distinctive description (≤10 tokens) | Never empty if extracting |
+| `body_part` | Format: "[body_part] of [person_brief_description]", normalized (no left/right) | Never empty if extracting |
+| `laterality_specified` | Whether "left"/"right" was mentioned | Always boolean |
+| `original_laterality` | "left", "right", or "unspecified" | Always one of these three |
+| `text_span` | Exact text from caption | Never empty if extracting |
+| `action_description` | Grounding description (≤32 tokens) | Never empty if extracting |
+| `interaction_object` | Object being interacted with | `null` if no physical interaction |
+| `interaction_type` | Type of interaction | Never empty if extracting |
+
+# When to Return Empty List
+Return `{{"uncertain_parts": []}}` when:
+1. No body parts are involved in any actions
+2. Only symmetric actions exist (clapping, folding arms)
+3. Only "both hands/feet" actions on same object exist
+4. Only non-lateral body parts are mentioned (head, face, back, chest)
 
 # Response
 """
