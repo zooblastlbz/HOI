@@ -320,7 +320,7 @@ def process_laterality_decision(items: List[Dict]) -> List[Dict]:
         if item.get('grounding_skipped', False):
             continue
         
-        annotations = item.get('"uncertain_body_part_annotation"', [])
+        annotations = item.get('"uncertain_parts"', [])
         if isinstance(annotations, str) or not annotations:
             continue
         
@@ -334,7 +334,7 @@ def process_laterality_decision(items: List[Dict]) -> List[Dict]:
                 count_filter_failed += 1
             updated_annotations.append(updated_part)
         
-        item['"uncertain_body_part_annotation"'] = updated_annotations
+        item['"uncertain_parts"'] = updated_annotations
     
     print(f"Laterality decision complete:")
     print(f"  - Total parts: {total_parts}")
@@ -907,7 +907,7 @@ class GroundingModule:
         Args:
             items: 列表，每个 item 包含:
                 - image_path: 图片路径
-                - "uncertain_body_part_annotation": Step1 的输出，可以是：
+                - "uncertain_parts": Step1 的输出，可以是：
                     - 字符串: "no_human_in_picture" 或 "all_body_parts_already_specified"
                     - 列表: 每个元素包含:
                         - person_brief_description: 简短人物描述（用于 grounding）
@@ -935,7 +935,7 @@ class GroundingModule:
         items_to_process = []  # (index, annotations)
         
         for i, item in enumerate(items):
-            annotations = item.get("uncertain_body_part_annotation", [])
+            annotations = item.get("uncertain_parts", [])
             
             # 过滤：跳过不需要处理的情况
             # Step1 返回字符串表示特殊情况
@@ -992,7 +992,7 @@ class GroundingModule:
             
             # 将结果写回
             for (item_idx, part_idx), bbox in zip(task_mapping, person_results):
-                items[item_idx]['"uncertain_body_part_annotation"'][part_idx]['person_bbox'] = bbox
+                items[item_idx]['"uncertain_parts"'][part_idx]['person_bbox'] = bbox
         
         # ========== Step 2：批量检测交互物体 (使用 interaction_object) ==========
         object_tasks = []
@@ -1000,7 +1000,7 @@ class GroundingModule:
         
         for item_idx, _ in items_to_process:
             image_path = items[item_idx].get('image_path')
-            annotations = items[item_idx]["uncertain_body_part_annotation"]
+            annotations = items[item_idx]["uncertain_parts"]
             
             for part_idx, part in enumerate(annotations):
                 person_bbox = part.get('person_bbox')
@@ -1022,7 +1022,7 @@ class GroundingModule:
             
             # 将结果写回
             for (item_idx, part_idx), obj_bboxes in zip(obj_task_mapping, object_results):
-                part = items[item_idx]["uncertain_body_part_annotation"][part_idx]
+                part = items[item_idx]["uncertain_parts"][part_idx]
                 part['object_bboxes'] = obj_bboxes
                 part['object_bbox'] = obj_bboxes[0] if obj_bboxes else None
         
@@ -1032,7 +1032,7 @@ class GroundingModule:
         
         for item_idx, _ in items_to_process:
             image_path = items[item_idx].get('image_path')
-            annotations = items[item_idx]["uncertain_body_part_annotation"]
+            annotations = items[item_idx]["uncertain_parts"]
             
             for part_idx, part in enumerate(annotations):
                 person_bbox = part.get('person_bbox')
@@ -1054,8 +1054,8 @@ class GroundingModule:
             
             # 将结果写回
             for (item_idx, part_idx), (bp_bbox, count) in zip(bp_task_mapping, body_part_results):
-                items[item_idx]["uncertain_body_part_annotation"][part_idx]['body_part_bbox'] = bp_bbox
-                items[item_idx]["uncertain_body_part_annotation"][part_idx]['body_part_count'] = count
+                items[item_idx]["uncertain_parts"][part_idx]['body_part_bbox'] = bp_bbox
+                items[item_idx]["uncertain_parts"][part_idx]['body_part_count'] = count
         
         # ========== Step 4：批量检测左右身体部位 (在 person_bbox 内使用 "left/right {body_part}") ==========
         lr_body_part_tasks = []
@@ -1063,7 +1063,7 @@ class GroundingModule:
         
         for item_idx, _ in items_to_process:
             image_path = items[item_idx].get('image_path')
-            annotations = items[item_idx]["uncertain_body_part_annotation"]
+            annotations = items[item_idx]["uncertain_parts"]
             
             for part_idx, part in enumerate(annotations):
                 person_bbox = part.get('person_bbox')
@@ -1084,7 +1084,7 @@ class GroundingModule:
             
             # 将结果写回
             for (item_idx, part_idx), lr_bboxes in zip(lr_task_mapping, lr_results):
-                part = items[item_idx]["uncertain_body_part_annotation"][part_idx]
+                part = items[item_idx]["uncertain_parts"][part_idx]
                 part['left_body_part_bbox'] = lr_bboxes.get('left_bbox')
                 part['left_body_part_count'] = lr_bboxes.get('left_count')
                 part['right_body_part_bbox'] = lr_bboxes.get('right_bbox')
@@ -1092,7 +1092,7 @@ class GroundingModule:
         
         # ========== Step 5：标记 grounding 有效性 ==========
         for item_idx, _ in items_to_process:
-            annotations = items[item_idx]["uncertain_body_part_annotation"]
+            annotations = items[item_idx]["uncertain_parts"]
             for part in annotations:
                 if part.get('person_bbox') is None:
                     part['grounding_valid'] = False

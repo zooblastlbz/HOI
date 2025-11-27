@@ -297,7 +297,7 @@ Return `{{"uncertain_parts": []}}` when:
         
         for i, item in enumerate(items):
             # Skip if already annotated
-            if 'uncertain_body_part_annotation' in item and item['uncertain_body_part_annotation']:
+            if 'uncertain_parts' in item and item['uncertain_parts']:
                 continue
             
             caption = item.get('caption', '')
@@ -310,7 +310,7 @@ Return `{{"uncertain_parts": []}}` when:
             
             # 如果没有人物ID，直接标记为"no human in the picture"
             if not id_descriptions:
-                item['uncertain_body_part_annotation'] = "no_human_in_picture"
+                item['uncertain_parts'] = "no_human_in_picture"
                 continue
             
             prompt = self._get_prompt(caption)
@@ -336,7 +336,7 @@ Return `{{"uncertain_parts": []}}` when:
                 if result is None:
                     print(f"Warning: Failed to extract JSON for item {idx}")
                     print(f"Raw output: {generated_text[:200]}...")
-                    items[idx]['uncertain_body_part_annotation'] = []
+                    items[idx]['uncertain_parts'] = []
                     items[idx]['llm_parse_error'] = "failed_to_extract_json"
                     continue
                 
@@ -345,17 +345,17 @@ Return `{{"uncertain_parts": []}}` when:
                 # 处理特殊情况
                 if isinstance(uncertain_parts, str):
                     # LLM 返回了字符串（如 "all_body_parts_already_specified"）
-                    items[idx]['uncertain_body_part_annotation'] = uncertain_parts
+                    items[idx]['uncertain_parts'] = uncertain_parts
                 elif isinstance(uncertain_parts, list) and len(uncertain_parts) == 0:
                     # 有人物但没有不确定的身体部位
-                    items[idx]['uncertain_body_part_annotation'] = "all_body_parts_already_specified"
+                    items[idx]['uncertain_parts'] = "all_body_parts_already_specified"
                 else:
-                    items[idx]['uncertain_body_part_annotation'] = uncertain_parts
+                    items[idx]['uncertain_parts'] = uncertain_parts
                     
             except Exception as e:
                 print(f"Error parsing output for item {idx}: {e}")
                 print(f"Raw output: {generated_text}...")
-                items[idx]['uncertain_body_part_annotation'] = []
+                items[idx]['uncertain_parts'] = []
                 items[idx]['llm_parse_error'] = str(e)
         
         # Cleanup
@@ -367,7 +367,7 @@ Return `{{"uncertain_parts": []}}` when:
         item = {"caption": caption}
         self.process_batch([item])
         return {
-            "uncertain_parts": item.get("uncertain_body_part_annotation", []),
+            "uncertain_parts": item.get("uncertain_parts", []),
             "person_id_mapping": item.get("person_id_mapping", {})
         }
 
