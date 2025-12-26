@@ -690,6 +690,7 @@ class SamBodyPartAnnotator:
                 success = visualize_body_part_bboxes(image_path, result, vis_path, vis_opacity, vis_line_width)
                 if success:
                     print(f"[Rank {RANK}] Saved visualization: {vis_path}")
+                    result["visualization_path"] = vis_path
             
             return result
             
@@ -787,6 +788,10 @@ class SamBodyPartAnnotator:
             for img_path, result in zip(batch_image_paths, batch_results):
                 for idx in path_to_indices[img_path]:
                     data_list[idx][output_key] = result
+                    # 若开启可视化，将 image_path 替换为可视化文件路径
+                    vis_path = result.get("visualization_path")
+                    if visualize and vis_path:
+                        data_list[idx][image_key] = vis_path
             
             # 每处理完一个batch就保存临时结果
             if temp_dir:
@@ -973,9 +978,9 @@ def update_image_paths(input_json: str, output_json: str, image_key: str = "imag
 def main():
     parser = argparse.ArgumentParser(description="MPI SAM Body Part BBox Annotation (One-Stage with YOLO Keypoints)")
     parser.add_argument("--model_name", type=str, default="/ytech_m2v5_hdd/workspace/kling_mm/Models/sam3/")
-    parser.add_argument("--input_json", type=str, default="/ytech_m2v8_hdd/workspace/kling_mm/libozhou/HOI/data/to_rewrite_20251223_yolo_filter_anno.json")
-    parser.add_argument("--output_json", type=str, default="/ytech_m2v8_hdd/workspace/kling_mm/libozhou/HOI/data/to_rewrite_20251223_yolo_filter_anno_sam.json")
-    parser.add_argument("--temp_dir", type=str, default="/ytech_m2v8_hdd/workspace/kling_mm/libozhou/HOI/data/to_rewrite_20251223_sam_tmp")
+    parser.add_argument("--input_json", type=str, default="/ytech_m2v8_hdd/workspace/kling_mm/libozhou/HOI/data/kling_imgcap_100w_origin_cap_yolo_filter_anno.json")
+    parser.add_argument("--output_json", type=str, default="/ytech_m2v8_hdd/workspace/kling_mm/libozhou/HOI/data/kling_imgcap_100w_origin_cap_yolo_filter_anno_sam.json")
+    parser.add_argument("--temp_dir", type=str, default="/ytech_m2v8_hdd/workspace/kling_mm/libozhou/HOI/data/kling_imgcap_100w_origin_cap_yolo_filter_anno_sam_tmp")
     parser.add_argument("--image_key", type=str, default="image_path")
     parser.add_argument("--pose_key", type=str, default="pose_annotation", help="JSON key for YOLO pose annotation")
     parser.add_argument("--output_key", type=str, default="bodypart_bbox_annotation")
@@ -984,7 +989,7 @@ def main():
     parser.add_argument("--crop_ratio", type=float, default=1.0, help="Crop ratio relative to image size (default 0.3 = 1/3, larger crop for better context)")
     parser.add_argument("--use_simplified_parts", action="store_true")
     parser.add_argument("--visualize",default=True ,action="store_true")
-    parser.add_argument("--vis_output_dir", type=str, default="/ytech_m2v8_hdd/workspace/kling_mm/libozhou/HOI/data/to_rewrite_20251223_sam_yolo_anno")
+    parser.add_argument("--vis_output_dir", type=str, default="/ytech_m2v8_hdd/workspace/kling_mm/libozhou/HOI/data/kling_imgcap_100w_origin_cap_yolo_filter_anno_sam")
     parser.add_argument("--vis_opacity", type=float, default=0.6, help="Visualization opacity (default 0.7 = 70% opaque, more visible)")
     parser.add_argument("--vis_line_width", type=int, default=3, help="Visualization line width in pixels (default 4)")
     parser.add_argument("--resume", action="store_true", help="Resume from previous interrupted run")
@@ -1107,6 +1112,10 @@ def main():
                     for idx in path_to_indices[img_path]:
                         item = dict(my_data[idx])
                         item[args.output_key] = result
+                        # 若开启可视化，将 image_path 指向可视化文件
+                        vis_path = result.get("visualization_path")
+                        if args.visualize and vis_path:
+                            item[args.image_key] = vis_path
                         batch_data.append(item)
                 
                 # 保存该 batch

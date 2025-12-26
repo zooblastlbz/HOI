@@ -1,25 +1,31 @@
 import json
-import os
 
-sam_anno_path="/ytech_m2v8_hdd/workspace/kling_mm/libozhou/HOI/data/to_rewrite_20251223_yolo_filter_anno_sam.json"
-sam_data_dir="/ytech_m2v8_hdd/workspace/kling_mm/libozhou/HOI/data/to_rewrite_20251223_sam_yolo_anno"
+from aem import con
 
-with open ("/ytech_m2v8_hdd/workspace/kling_mm/libozhou/HOI/data/to_rewrite_20251223_yolo_filter_anno_sam copy.json","r",encoding="utf-8") as f:
-    sam_anno_data=json.load(f)
-    
-    
-sam_path_dict={}
-for ranl in os.listdir(sam_data_dir):
-    for image_path in os.listdir(os.path.join(sam_data_dir,ranl)):
-        sam_path_dict[image_path.split('_')[-1]]=os.path.join(sam_data_dir,ranl,image_path)
-        
-    
-    
+path="/ytech_m2v5_hdd/workspace/kling_mm/dingyue08/spatial-r1/HOI/HOI/data/kling_imgcap_100w_yolo_filtered_recaped_anno_rewrite_bbox_sharegpt_eval.json"
 
 
-for item in sam_anno_data:
-    if item['image_path'].split('/')[-1] in sam_path_dict:
-        item['image_path']=sam_path_dict[item['image_path'].split('/')[-1]]
-        
-with open(sam_anno_path,"w") as f:
-    json.dump(sam_anno_data,f,indent=4,ensure_ascii=False)
+
+with open(path, 'r') as f:
+    data = json.load(f)
+    
+origin_data="/ytech_m2v5_hdd/workspace/kling_mm/dingyue08/spatial-r1/HOI/HOI/data/kling_imgcap_100w_yolo_filtered_recaped_dataset.json"
+with open(origin_data, 'r') as f:
+    origin = json.load(f)
+    
+origin_caption_dict = {}
+for item in origin:
+    origin_caption=item['old_caption']
+    origin_caption=origin_caption.split("<question_answer_split_token>")[-1]
+    origin_caption=origin_caption.split("<|im_end|>")[0].strip()
+    origin_caption_dict[item['caption']] = origin_caption
+
+for item in data:
+    content=item['messages'][1]['content']
+    content_list=content.split("\n\n")
+    new_content=content_list[0] + "\n\n"+origin_caption_dict[content_list[1]] + "\n\n" + content_list[2]
+    item['messages'][1]['content'] = new_content
+    
+with open("/ytech_m2v5_hdd/workspace/kling_mm/dingyue08/spatial-r1/HOI/HOI/data/kling_imgcap_100w_yolo_filtered_recaped_anno_rewrite_bbox_sharegpt_eval_origin_caption.json", 'w') as f:
+    json.dump(data, f, indent=4)
+    
